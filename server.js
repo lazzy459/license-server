@@ -1,14 +1,29 @@
 require('dotenv').config()
 const express = require('express')
-const { Pool } = require('pg')
+const https = require('https')
 const app = express()
 
 app.use(express.json())
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-})
+// URL whitelist.json dari GitHub kamu
+const WHITELIST_URL = "https://raw.githubusercontent.com/lazzy459/license-server/main/whitelist.json"
+
+// Fungsi ambil whitelist dari GitHub
+function getWhitelist() {
+  return new Promise((resolve, reject) => {
+    https.get(WHITELIST_URL, (res) => {
+      let data = ''
+      res.on('data', chunk => data += chunk)
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data))
+        } catch (e) {
+          reject(e)
+        }
+      })
+    }).on('error', reject)
+  })
+}
 
 // ✅ Validasi Lisensi
 app.post('/validate', async (req, res) => {
@@ -19,74 +34,34 @@ app.post('/validate', async (req, res) => {
   }
 
   try {
-    const result = await pool.query(
-      'SELECT * FROM licenses WHERE key = $1 AND is_active = true',
-      [key]
-    )
+    const whitelist = await getWhitelist()
+    const license = whitelist.licenses.find(l => l.key === key)
 
-    if (result.rows.length === 0) {
+    if (!license) {
       return res.json({ valid: false, reason: "Key tidak ditemukan" })
     }
 
-    const license = result.rows[0]
+    if (!license.active) {
+      return res.json({ valid: false, reason: "Lisensi dinonaktifkan" })
+    }
 
     if (license.place_id && String(license.place_id) !== String(place_id)) {
       return res.json({ valid: false, reason: "PlaceID tidak cocok" })
     }
 
-    if (license.expires_at && new Date(license.expires_at) < new Date()) {
+    if (license.expires && new Date(license.expires) < new Date()) {
       return res.json({ valid: false, reason: "Lisensi expired" })
     }
 
     return res.json({
       valid: true,
       owner: license.owner_name,
-      expires_at: license.expires_at || "Permanent"
+      roblox_id: license.roblox_id,
+      expires: license.expires || "Permanent"
     })
 
   } catch (err) {
-    return res.status(500).json({ valid: false, reason: "Server error" })
-  }
-})
-
-// ✅ Tambah Lisensi Baru
-app.post('/add-license', async (req, res) => {
-  const { secret, key, owner_name, place_id, days } = req.body
-
-  if (secret !== process.env.API_SECRET) {
-    return res.status(401).json({ success: false, reason: "Unauthorized" })
-  }
-
-  const expires_at = days
-    ? new Date(Date.now() + days * 24 * 60 * 60 * 1000)
-    : null
-
-  try {
-    await pool.query(
-      'INSERT INTO licenses (key, owner_name, place_id, expires_at) VALUES ($1, $2, $3, $4)',
-      [key, owner_name, place_id, expires_at]
-    )
-    return res.json({ success: true, message: `Lisensi ${key} ditambahkan!` })
-  } catch (err) {
-    return res.status(500).json({ success: false, reason: err.message })
-  }
-})
-
-// ✅ Cabut Lisensi
-app.post('/revoke', async (req, res) => {
-  const { secret, key } = req.body
-
-  if (secret !== process.env.API_SECRET) {
-    return res.status(401).json({ success: false, reason: "Unauthorized" })
-  }
-
-  try {
-    await pool.query(
-      'UPDATE licenses SET is_active = false WHERE key = $1', [key]
-    )
-    return res.json({ success: true, message: `Lisensi ${key} dicabut!` })
-  } catch (err) {
-    return res.status(500).json({ success: false, reason: err.message })
+    return res.status(500).json({ valid: false, reason: "Gagal baca whitelist" })
   }
 })
 
