@@ -5,8 +5,10 @@ const app = express()
 
 app.use(express.json())
 
+// URL whitelist.json dari GitHub kamu
 const WHITELIST_URL = "https://raw.githubusercontent.com/lazzy459/license-server/main/whitelist.json"
 
+// Fungsi ambil whitelist dari GitHub
 function getWhitelist() {
   return new Promise((resolve, reject) => {
     https.get(WHITELIST_URL, (res) => {
@@ -58,6 +60,7 @@ app.post('/validate', async (req, res) => {
     })
 
   } catch (err) {
+    console.error(err)
     return res.status(500).json({ valid: false, reason: "Gagal baca whitelist" })
   }
 })
