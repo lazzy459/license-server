@@ -5,10 +5,8 @@ const app = express()
 
 app.use(express.json())
 
-// URL whitelist.json dari GitHub kamu
 const WHITELIST_URL = "https://raw.githubusercontent.com/lazzy459/license-server/main/whitelist.json"
 
-// Fungsi ambil whitelist dari GitHub
 function getWhitelist() {
   return new Promise((resolve, reject) => {
     https.get(WHITELIST_URL, (res) => {
@@ -25,7 +23,6 @@ function getWhitelist() {
   })
 }
 
-// ✅ Validasi Lisensi
 app.post('/validate', async (req, res) => {
   const { roblox_id, place_id, secret } = req.body
 
@@ -36,7 +33,6 @@ app.post('/validate', async (req, res) => {
   try {
     const whitelist = await getWhitelist()
 
-    // Cek berdasarkan roblox_id DAN place_id
     const license = whitelist.licenses.find(l =>
       String(l.roblox_id) === String(roblox_id) &&
       String(l.place_id) === String(place_id)
@@ -61,11 +57,10 @@ app.post('/validate', async (req, res) => {
 
   } catch (err) {
     console.error(err)
-    return res.status(500).json({ valid: false, reason: "Gagal baca whitelist" })
+    return res.status(500).json({ valid: false, reason: "Gagal baca whitelist: " + err.message })
   }
 })
 
-// ✅ Cek Server Hidup
 app.get('/', (req, res) => {
   res.json({ status: "License Server is running ✅" })
 })
