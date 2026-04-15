@@ -13,17 +13,26 @@ function getWhitelist() {
       res.on('data', chunk => data += chunk)
       res.on('end', () => {
         try {
-          resolve(JSON.parse(data))
+          const parsed = JSON.parse(data)
+          if (!parsed || !parsed.licenses) {
+            reject(new Error("Format whitelist tidak valid"))
+            return
+          }
+          resolve(parsed)
         } catch (e) {
-          reject(e)
+          reject(new Error("Gagal parse JSON: " + e.message))
         }
       })
-    }).on('error', reject)
+    }).on('error', (e) => reject(new Error("Gagal fetch whitelist: " + e.message)))
   })
 }
 
 app.post('/validate', async (req, res) => {
   const { roblox_id, secret } = req.body
+
+  if (!roblox_id || !secret) {
+    return res.status(400).json({ valid: false, reason: "Parameter kurang" })
+  }
 
   if (secret !== process.env.API_SECRET) {
     return res.status(401).json({ valid: false, reason: "Unauthorized" })
@@ -50,8 +59,8 @@ app.post('/validate', async (req, res) => {
     return res.json({ valid: true, owner: license.owner_name })
 
   } catch (err) {
-    console.error(err)
-    return res.status(500).json({ valid: false, reason: "Gagal baca whitelist: " + err.message })
+    console.error("Error:", err.message)
+    return res.status(500).json({ valid: false, reason: "Server error: " + err.message })
   }
 })
 
