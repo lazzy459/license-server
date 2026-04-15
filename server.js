@@ -32,7 +32,6 @@ app.post('/validate', async (req, res) => {
 
   try {
     const whitelist = await getWhitelist()
-
     const license = whitelist.licenses.find(l =>
       String(l.roblox_id) === String(roblox_id) &&
       String(l.place_id) === String(place_id)
@@ -50,10 +49,7 @@ app.post('/validate', async (req, res) => {
       return res.json({ valid: false, reason: "Lisensi expired" })
     }
 
-    return res.json({
-      valid: true,
-      owner: license.owner_name
-    })
+    return res.json({ valid: true, owner: license.owner_name })
 
   } catch (err) {
     console.error(err)
