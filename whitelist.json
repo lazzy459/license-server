@@ -1,11 +1,6 @@
 {
-  "licenses": [
-    {
-      "owner_name": "NamaPembeli1",
-      "roblox_id": "",
-      "place_id": "",
-      "active": true,
-      "expires": null
-    }
-  ]
+  "owner_name": "NamaPembeli2",
+  "roblox_id": "ID_ROBLOX_PEMBELI",
+  "active": true,
+  "expires": null
 }
