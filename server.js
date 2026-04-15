@@ -5,11 +5,11 @@ const app = express()
 
 app.use(express.json())
 
+const WHITELIST_URL = "https://raw.githubusercontent.com/lazzy459/license-server/main/whitelist.json"
+
 function getWhitelist() {
   return new Promise((resolve, reject) => {
-    const url = `https://raw.githubusercontent.com/lazzy459/license-server/main/whitelist.json?t=${Date.now()}`
-    
-    https.get(url, (res) => {
+    https.get(WHITELIST_URL, (res) => {
       let data = ''
       res.on('data', chunk => data += chunk)
       res.on('end', () => {
