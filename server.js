@@ -5,10 +5,8 @@ const app = express()
 
 app.use(express.json())
 
-// URL whitelist.json dari GitHub kamu
 const WHITELIST_URL = "https://raw.githubusercontent.com/lazzy459/license-server/main/whitelist.json"
 
-// Fungsi ambil whitelist dari GitHub
 function getWhitelist() {
   return new Promise((resolve, reject) => {
     https.get(WHITELIST_URL, (res) => {
@@ -27,7 +25,7 @@ function getWhitelist() {
 
 // ✅ Validasi Lisensi
 app.post('/validate', async (req, res) => {
-  const { key, place_id, secret } = req.body
+  const { roblox_id, place_id, secret } = req.body
 
   if (secret !== process.env.API_SECRET) {
     return res.status(401).json({ valid: false, reason: "Unauthorized" })
@@ -35,18 +33,19 @@ app.post('/validate', async (req, res) => {
 
   try {
     const whitelist = await getWhitelist()
-    const license = whitelist.licenses.find(l => l.key === key)
+
+    // Cek berdasarkan roblox_id DAN place_id
+    const license = whitelist.licenses.find(l =>
+      String(l.roblox_id) === String(roblox_id) &&
+      String(l.place_id) === String(place_id)
+    )
 
     if (!license) {
-      return res.json({ valid: false, reason: "Key tidak ditemukan" })
+      return res.json({ valid: false, reason: "Tidak ada di whitelist" })
     }
 
     if (!license.active) {
       return res.json({ valid: false, reason: "Lisensi dinonaktifkan" })
-    }
-
-    if (license.place_id && String(license.place_id) !== String(place_id)) {
-      return res.json({ valid: false, reason: "PlaceID tidak cocok" })
     }
 
     if (license.expires && new Date(license.expires) < new Date()) {
@@ -55,9 +54,7 @@ app.post('/validate', async (req, res) => {
 
     return res.json({
       valid: true,
-      owner: license.owner_name,
-      roblox_id: license.roblox_id,
-      expires: license.expires || "Permanent"
+      owner: license.owner_name
     })
 
   } catch (err) {

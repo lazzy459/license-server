@@ -1,18 +1,9 @@
 {
   "licenses": [
     {
-      "key": "LIC-ABCD-1234-EFGH",
       "owner_name": "NamaPembeli1",
       "roblox_id": "123456789",
       "place_id": 12345678901,
-      "active": true,
-      "expires": null
-    },
-    {
-      "key": "LIC-WXYZ-5678-IJKL",
-      "owner_name": "NamaPembeli2",
-      "roblox_id": "987654321",
-      "place_id": 98765432101,
       "active": true,
       "expires": null
     }
