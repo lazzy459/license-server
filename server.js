@@ -31,8 +31,6 @@ app.post('/validate', async (req, res) => {
 
   try {
     const whitelist = await getWhitelist()
-
-    // Cek hanya berdasarkan roblox_id saja
     const license = whitelist.licenses.find(l =>
       String(l.roblox_id) === String(roblox_id)
     )
