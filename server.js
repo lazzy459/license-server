@@ -13,7 +13,6 @@ const pool = new Pool({
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL
 
-// Fungsi ambil nama game dari Roblox API
 function getGameName(placeId) {
   return new Promise((resolve) => {
     const options = {
@@ -43,7 +42,6 @@ function getGameName(placeId) {
   })
 }
 
-// Fungsi ambil username dari Roblox API
 function getRobloxUsername(userId) {
   return new Promise((resolve) => {
     const options = {
@@ -73,7 +71,6 @@ function getRobloxUsername(userId) {
   })
 }
 
-// Fungsi kirim log ke Discord
 function sendDiscordLog(roblox_id, username, place_id, gameName, reason) {
   if (!DISCORD_WEBHOOK_URL) return
 
