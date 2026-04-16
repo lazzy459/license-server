@@ -1,34 +1,17 @@
 require('dotenv').config()
 const express = require('express')
 const https = require('https')
-const http = require('http')
+const { Pool } = require('pg')
 const app = express()
 
 app.use(express.json())
 
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+})
 
-function getWhitelist() {
-  return new Promise((resolve, reject) => {
-    const url = `https://raw.githubusercontent.com/lazzy459/license-server/main/whitelist.json?t=${Date.now()}`
-    https.get(url, (res) => {
-      let data = ''
-      res.on('data', chunk => data += chunk)
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(data)
-          if (!parsed || !parsed.licenses) {
-            reject(new Error("Format whitelist tidak valid"))
-            return
-          }
-          resolve(parsed)
-        } catch (e) {
-          reject(new Error("Gagal parse JSON: " + e.message))
-        }
-      })
-    }).on('error', (e) => reject(new Error("Gagal fetch whitelist: " + e.message)))
-  })
-}
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL
 
 // Fungsi ambil nama game dari Roblox API
 function getGameName(placeId) {
@@ -90,7 +73,7 @@ function getRobloxUsername(userId) {
   })
 }
 
-// Fungsi kirim notifikasi ke Discord
+// Fungsi kirim log ke Discord
 function sendDiscordLog(roblox_id, username, place_id, gameName, reason) {
   if (!DISCORD_WEBHOOK_URL) return
 
@@ -112,7 +95,6 @@ function sendDiscordLog(roblox_id, username, place_id, gameName, reason) {
 
   const body = JSON.stringify(embed)
   const webhookUrl = new URL(DISCORD_WEBHOOK_URL)
-
   const options = {
     hostname: webhookUrl.hostname,
     path: webhookUrl.pathname + webhookUrl.search,
@@ -122,7 +104,6 @@ function sendDiscordLog(roblox_id, username, place_id, gameName, reason) {
       'Content-Length': Buffer.byteLength(body)
     }
   }
-
   const req = https.request(options)
   req.on('error', (e) => console.error('Webhook error:', e.message))
   req.write(body)
@@ -131,7 +112,7 @@ function sendDiscordLog(roblox_id, username, place_id, gameName, reason) {
 
 // ✅ Validasi Lisensi
 app.post('/validate', async (req, res) => {
-  const { roblox_id, secret } = req.body
+  const { roblox_id, place_id, secret } = req.body
 
   if (!roblox_id || !secret) {
     return res.status(400).json({ valid: false, reason: "Parameter kurang" })
@@ -142,46 +123,28 @@ app.post('/validate', async (req, res) => {
   }
 
   try {
-    const whitelist = await getWhitelist()
-    const license = whitelist.licenses.find(l =>
-      String(l.roblox_id) === String(roblox_id)
+    const result = await pool.query(
+      'SELECT * FROM licenses WHERE roblox_id = $1 AND is_active = true',
+      [String(roblox_id)]
     )
 
-    if (!license) {
-      // Ambil info untuk logging
-      const place_id = req.body.place_id || "Unknown"
+    if (result.rows.length === 0) {
       const [username, gameName] = await Promise.all([
         getRobloxUsername(roblox_id),
         getGameName(place_id)
       ])
-
-      // Kirim log ke Discord
       sendDiscordLog(roblox_id, username, place_id, gameName, "User ID tidak ada di whitelist")
-
       return res.json({ valid: false, reason: "User ID tidak ada di whitelist" })
     }
 
-    if (!license.active) {
-      const place_id = req.body.place_id || "Unknown"
+    const license = result.rows[0]
+
+    if (license.expires_at && new Date(license.expires_at) < new Date()) {
       const [username, gameName] = await Promise.all([
         getRobloxUsername(roblox_id),
         getGameName(place_id)
       ])
-
-      sendDiscordLog(roblox_id, username, place_id, gameName, "Lisensi dinonaktifkan")
-
-      return res.json({ valid: false, reason: "Lisensi dinonaktifkan" })
-    }
-
-    if (license.expires && new Date(license.expires) < new Date()) {
-      const place_id = req.body.place_id || "Unknown"
-      const [username, gameName] = await Promise.all([
-        getRobloxUsername(roblox_id),
-        getGameName(place_id)
-      ])
-
       sendDiscordLog(roblox_id, username, place_id, gameName, "Lisensi expired")
-
       return res.json({ valid: false, reason: "Lisensi expired" })
     }
 
@@ -190,6 +153,83 @@ app.post('/validate', async (req, res) => {
   } catch (err) {
     console.error("Error:", err.message)
     return res.status(500).json({ valid: false, reason: "Server error: " + err.message })
+  }
+})
+
+// ✅ Tambah Lisensi
+app.post('/add-license', async (req, res) => {
+  const { secret, roblox_id, owner_name, days } = req.body
+
+  if (secret !== process.env.API_SECRET) {
+    return res.status(401).json({ success: false, reason: "Unauthorized" })
+  }
+
+  const expires_at = days
+    ? new Date(Date.now() + days * 24 * 60 * 60 * 1000)
+    : null
+
+  try {
+    await pool.query(
+      'INSERT INTO licenses (roblox_id, owner_name, expires_at) VALUES ($1, $2, $3) ON CONFLICT (roblox_id) DO UPDATE SET is_active = true, owner_name = $2, expires_at = $3',
+      [String(roblox_id), owner_name, expires_at]
+    )
+    return res.json({ success: true, message: `Lisensi ${roblox_id} ditambahkan!` })
+  } catch (err) {
+    return res.status(500).json({ success: false, reason: err.message })
+  }
+})
+
+// ✅ Cabut Lisensi
+app.post('/revoke', async (req, res) => {
+  const { secret, roblox_id } = req.body
+
+  if (secret !== process.env.API_SECRET) {
+    return res.status(401).json({ success: false, reason: "Unauthorized" })
+  }
+
+  try {
+    await pool.query(
+      'UPDATE licenses SET is_active = false WHERE roblox_id = $1',
+      [String(roblox_id)]
+    )
+    return res.json({ success: true, message: `Lisensi ${roblox_id} dicabut!` })
+  } catch (err) {
+    return res.status(500).json({ success: false, reason: err.message })
+  }
+})
+
+// ✅ Aktifkan Lisensi
+app.post('/enable', async (req, res) => {
+  const { secret, roblox_id } = req.body
+
+  if (secret !== process.env.API_SECRET) {
+    return res.status(401).json({ success: false, reason: "Unauthorized" })
+  }
+
+  try {
+    await pool.query(
+      'UPDATE licenses SET is_active = true WHERE roblox_id = $1',
+      [String(roblox_id)]
+    )
+    return res.json({ success: true, message: `Lisensi ${roblox_id} diaktifkan!` })
+  } catch (err) {
+    return res.status(500).json({ success: false, reason: err.message })
+  }
+})
+
+// ✅ List Semua Lisensi
+app.get('/list', async (req, res) => {
+  const { secret } = req.query
+
+  if (secret !== process.env.API_SECRET) {
+    return res.status(401).json({ success: false, reason: "Unauthorized" })
+  }
+
+  try {
+    const result = await pool.query('SELECT * FROM licenses ORDER BY created_at DESC')
+    return res.json({ success: true, licenses: result.rows })
+  } catch (err) {
+    return res.status(500).json({ success: false, reason: err.message })
   }
 })
 
