@@ -8,7 +8,16 @@ app.use(express.json())
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  connectionTimeoutMillis: 5000,
+  idleTimeoutMillis: 30000,
+  max: 10,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000
+})
+
+pool.on('error', (err) => {
+  console.error('Database pool error:', err.message)
 })
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL
@@ -32,9 +41,7 @@ function getGameName(placeId) {
           } else {
             resolve('Unknown Game')
           }
-        } catch {
-          resolve('Unknown Game')
-        }
+        } catch { resolve('Unknown Game') }
       })
     })
     req.on('error', () => resolve('Unknown Game'))
@@ -56,14 +63,8 @@ function getRobloxUsername(userId) {
       res.on('end', () => {
         try {
           const parsed = JSON.parse(data)
-          if (parsed && parsed.name) {
-            resolve(parsed.name)
-          } else {
-            resolve('Unknown User')
-          }
-        } catch {
-          resolve('Unknown User')
-        }
+          resolve(parsed && parsed.name ? parsed.name : 'Unknown User')
+        } catch { resolve('Unknown User') }
       })
     })
     req.on('error', () => resolve('Unknown User'))
@@ -72,18 +73,23 @@ function getRobloxUsername(userId) {
 }
 
 function sendDiscordLog(roblox_id, username, place_id, gameName, reason) {
-  if (!DISCORD_WEBHOOK_URL) return
+  if (!DISCORD_WEBHOOK_URL) {
+    console.log("❌ DISCORD_WEBHOOK_URL tidak ada!")
+    return
+  }
+
+  console.log("📤 Mengirim log ke Discord...")
 
   const embed = {
     embeds: [{
       title: "⚠️ Percobaan Akses Tidak Sah!",
       color: 0xff0000,
       fields: [
-        { name: "👤 Username Roblox", value: username || "Unknown", inline: true },
-        { name: "🆔 Roblox User ID", value: String(roblox_id) || "Unknown", inline: true },
-        { name: "🎮 Place ID", value: String(place_id) || "Unknown", inline: true },
-        { name: "🗺️ Nama Map", value: gameName || "Unknown", inline: true },
-        { name: "❌ Alasan", value: reason || "Tidak diketahui", inline: true }
+        { name: "👤 Username Roblox", value: String(username || "Unknown"), inline: true },
+        { name: "🆔 Roblox User ID", value: String(roblox_id || "Unknown"), inline: true },
+        { name: "🎮 Place ID", value: String(place_id || "Unknown"), inline: true },
+        { name: "🗺️ Nama Map", value: String(gameName || "Unknown"), inline: true },
+        { name: "❌ Alasan", value: String(reason || "Tidak diketahui"), inline: true }
       ],
       timestamp: new Date().toISOString(),
       footer: { text: "License System Logger" }
@@ -101,7 +107,14 @@ function sendDiscordLog(roblox_id, username, place_id, gameName, reason) {
       'Content-Length': Buffer.byteLength(body)
     }
   }
-  const req = https.request(options)
+
+  const req = https.request(options, (res) => {
+    let data = ''
+    res.on('data', chunk => data += chunk)
+    res.on('end', () => {
+      console.log("Discord webhook status:", res.statusCode)
+    })
+  })
   req.on('error', (e) => console.error('Webhook error:', e.message))
   req.write(body)
   req.end()
