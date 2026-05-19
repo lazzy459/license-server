@@ -6,6 +6,39 @@ const app = express()
 
 app.use(express.json())
 
+// ✅ Rate Limiting - maksimal 5 request per menit per IP
+const requestCounts = {}
+const RATE_LIMIT = 5
+const RATE_WINDOW = 60 * 1000 // 1 menit
+
+function rateLimiter(req, res, next) {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress
+  const now = Date.now()
+
+  if (!requestCounts[ip]) {
+    requestCounts[ip] = { count: 1, resetTime: now + RATE_WINDOW }
+  } else if (now > requestCounts[ip].resetTime) {
+    requestCounts[ip] = { count: 1, resetTime: now + RATE_WINDOW }
+  } else {
+    requestCounts[ip].count++
+    if (requestCounts[ip].count > RATE_LIMIT) {
+      console.log(`Rate limit exceeded for IP: ${ip}`)
+      return res.status(429).json({ valid: false, reason: "Terlalu banyak request!" })
+    }
+  }
+  next()
+}
+
+// Bersihkan data rate limit setiap 5 menit
+setInterval(() => {
+  const now = Date.now()
+  for (const ip in requestCounts) {
+    if (now > requestCounts[ip].resetTime) {
+      delete requestCounts[ip]
+    }
+  }
+}, 5 * 60 * 1000)
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -73,12 +106,7 @@ function getRobloxUsername(userId) {
 }
 
 function sendDiscordLog(roblox_id, username, place_id, gameName, reason) {
-  if (!DISCORD_WEBHOOK_URL) {
-    console.log("❌ DISCORD_WEBHOOK_URL tidak ada!")
-    return
-  }
-
-  console.log("📤 Mengirim log ke Discord...")
+  if (!DISCORD_WEBHOOK_URL) return
 
   const embed = {
     embeds: [{
@@ -107,7 +135,6 @@ function sendDiscordLog(roblox_id, username, place_id, gameName, reason) {
       'Content-Length': Buffer.byteLength(body)
     }
   }
-
   const req = https.request(options, (res) => {
     let data = ''
     res.on('data', chunk => data += chunk)
@@ -120,8 +147,12 @@ function sendDiscordLog(roblox_id, username, place_id, gameName, reason) {
   req.end()
 }
 
+// ✅ Cache untuk valid licenses (simpan 5 menit)
+const validCache = {}
+const CACHE_DURATION = 5 * 60 * 1000 // 5 menit
+
 // ✅ Validasi Lisensi
-app.post('/validate', async (req, res) => {
+app.post('/validate', rateLimiter, async (req, res) => {
   const { roblox_id, place_id, secret } = req.body
 
   if (!roblox_id || !secret) {
@@ -130,6 +161,13 @@ app.post('/validate', async (req, res) => {
 
   if (secret !== process.env.API_SECRET) {
     return res.status(401).json({ valid: false, reason: "Unauthorized" })
+  }
+
+  // Cek cache dulu — kalau baru valid 5 menit lalu, langsung approve
+  const cacheKey = String(roblox_id)
+  if (validCache[cacheKey] && Date.now() < validCache[cacheKey].expires) {
+    console.log(`Cache hit for ${roblox_id}`)
+    return res.json({ valid: true, owner: validCache[cacheKey].owner })
   }
 
   try {
@@ -158,6 +196,12 @@ app.post('/validate', async (req, res) => {
       return res.json({ valid: false, reason: "Lisensi expired" })
     }
 
+    // Simpan ke cache
+    validCache[cacheKey] = {
+      owner: license.owner_name,
+      expires: Date.now() + CACHE_DURATION
+    }
+
     return res.json({ valid: true, owner: license.owner_name })
 
   } catch (err) {
@@ -183,6 +227,8 @@ app.post('/add-license', async (req, res) => {
       'INSERT INTO licenses (roblox_id, owner_name, expires_at) VALUES ($1, $2, $3) ON CONFLICT (roblox_id) DO UPDATE SET is_active = true, owner_name = $2, expires_at = $3',
       [String(roblox_id), owner_name, expires_at]
     )
+    // Hapus cache kalau ada
+    delete validCache[String(roblox_id)]
     return res.json({ success: true, message: `Lisensi ${roblox_id} ditambahkan!` })
   } catch (err) {
     return res.status(500).json({ success: false, reason: err.message })
@@ -202,6 +248,8 @@ app.post('/revoke', async (req, res) => {
       'UPDATE licenses SET is_active = false WHERE roblox_id = $1',
       [String(roblox_id)]
     )
+    // Hapus cache
+    delete validCache[String(roblox_id)]
     return res.json({ success: true, message: `Lisensi ${roblox_id} dicabut!` })
   } catch (err) {
     return res.status(500).json({ success: false, reason: err.message })
@@ -221,6 +269,7 @@ app.post('/enable', async (req, res) => {
       'UPDATE licenses SET is_active = true WHERE roblox_id = $1',
       [String(roblox_id)]
     )
+    delete validCache[String(roblox_id)]
     return res.json({ success: true, message: `Lisensi ${roblox_id} diaktifkan!` })
   } catch (err) {
     return res.status(500).json({ success: false, reason: err.message })
