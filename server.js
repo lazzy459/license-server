@@ -6,39 +6,6 @@ const app = express()
 
 app.use(express.json())
 
-// ✅ Rate Limiting - maksimal 5 request per menit per IP
-const requestCounts = {}
-const RATE_LIMIT = 5
-const RATE_WINDOW = 60 * 1000 // 1 menit
-
-function rateLimiter(req, res, next) {
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress
-  const now = Date.now()
-
-  if (!requestCounts[ip]) {
-    requestCounts[ip] = { count: 1, resetTime: now + RATE_WINDOW }
-  } else if (now > requestCounts[ip].resetTime) {
-    requestCounts[ip] = { count: 1, resetTime: now + RATE_WINDOW }
-  } else {
-    requestCounts[ip].count++
-    if (requestCounts[ip].count > RATE_LIMIT) {
-      console.log(`Rate limit exceeded for IP: ${ip}`)
-      return res.status(429).json({ valid: false, reason: "Terlalu banyak request!" })
-    }
-  }
-  next()
-}
-
-// Bersihkan data rate limit setiap 5 menit
-setInterval(() => {
-  const now = Date.now()
-  for (const ip in requestCounts) {
-    if (now > requestCounts[ip].resetTime) {
-      delete requestCounts[ip]
-    }
-  }
-}, 5 * 60 * 1000)
-
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -55,6 +22,39 @@ pool.on('error', (err) => {
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL
 
+// ✅ Rate Limiting
+const requestCounts = {}
+const RATE_LIMIT = 5
+const RATE_WINDOW = 60 * 1000
+
+function rateLimiter(req, res, next) {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress
+  const now = Date.now()
+  if (!requestCounts[ip]) {
+    requestCounts[ip] = { count: 1, resetTime: now + RATE_WINDOW }
+  } else if (now > requestCounts[ip].resetTime) {
+    requestCounts[ip] = { count: 1, resetTime: now + RATE_WINDOW }
+  } else {
+    requestCounts[ip].count++
+    if (requestCounts[ip].count > RATE_LIMIT) {
+      console.log(`Rate limit exceeded for IP: ${ip}`)
+      return res.status(429).json({ valid: false, reason: "Terlalu banyak request!" })
+    }
+  }
+  next()
+}
+
+setInterval(() => {
+  const now = Date.now()
+  for (const ip in requestCounts) {
+    if (now > requestCounts[ip].resetTime) delete requestCounts[ip]
+  }
+}, 5 * 60 * 1000)
+
+// ✅ Cache valid license 5 menit
+const validCache = {}
+const CACHE_DURATION = 5 * 60 * 1000
+
 function getGameName(placeId) {
   return new Promise((resolve) => {
     const options = {
@@ -69,11 +69,7 @@ function getGameName(placeId) {
       res.on('end', () => {
         try {
           const parsed = JSON.parse(data)
-          if (parsed && parsed[0] && parsed[0].name) {
-            resolve(parsed[0].name)
-          } else {
-            resolve('Unknown Game')
-          }
+          resolve(parsed && parsed[0] && parsed[0].name ? parsed[0].name : 'Unknown Game')
         } catch { resolve('Unknown Game') }
       })
     })
@@ -136,20 +132,14 @@ function sendDiscordLog(roblox_id, username, place_id, gameName, reason) {
     }
   }
   const req = https.request(options, (res) => {
-    let data = ''
-    res.on('data', chunk => data += chunk)
-    res.on('end', () => {
-      console.log("Discord webhook status:", res.statusCode)
-    })
+    let d = ''
+    res.on('data', chunk => d += chunk)
+    res.on('end', () => console.log("Webhook status:", res.statusCode))
   })
   req.on('error', (e) => console.error('Webhook error:', e.message))
   req.write(body)
   req.end()
 }
-
-// ✅ Cache untuk valid licenses (simpan 5 menit)
-const validCache = {}
-const CACHE_DURATION = 5 * 60 * 1000 // 5 menit
 
 // ✅ Validasi Lisensi
 app.post('/validate', rateLimiter, async (req, res) => {
@@ -163,14 +153,25 @@ app.post('/validate', rateLimiter, async (req, res) => {
     return res.status(401).json({ valid: false, reason: "Unauthorized" })
   }
 
-  // Cek cache dulu — kalau baru valid 5 menit lalu, langsung approve
-  const cacheKey = String(roblox_id)
-  if (validCache[cacheKey] && Date.now() < validCache[cacheKey].expires) {
-    console.log(`Cache hit for ${roblox_id}`)
-    return res.json({ valid: true, owner: validCache[cacheKey].owner })
-  }
-
   try {
+    // ✅ Cek blacklist PERTAMA - tidak cek database, tidak kirim log
+    const blacklisted = await pool.query(
+      'SELECT * FROM blacklist WHERE roblox_id = $1',
+      [String(roblox_id)]
+    )
+    if (blacklisted.rows.length > 0) {
+      console.log(`Blacklisted user blocked: ${roblox_id}`)
+      return res.json({ valid: false, reason: "Akses ditolak!" })
+    }
+
+    // ✅ Cek cache
+    const cacheKey = String(roblox_id)
+    if (validCache[cacheKey] && Date.now() < validCache[cacheKey].expires) {
+      console.log(`Cache hit for ${roblox_id}`)
+      return res.json({ valid: true, owner: validCache[cacheKey].owner })
+    }
+
+    // ✅ Cek database
     const result = await pool.query(
       'SELECT * FROM licenses WHERE roblox_id = $1 AND is_active = true',
       [String(roblox_id)]
@@ -213,21 +214,15 @@ app.post('/validate', rateLimiter, async (req, res) => {
 // ✅ Tambah Lisensi
 app.post('/add-license', async (req, res) => {
   const { secret, roblox_id, owner_name, days } = req.body
-
   if (secret !== process.env.API_SECRET) {
     return res.status(401).json({ success: false, reason: "Unauthorized" })
   }
-
-  const expires_at = days
-    ? new Date(Date.now() + days * 24 * 60 * 60 * 1000)
-    : null
-
+  const expires_at = days ? new Date(Date.now() + days * 24 * 60 * 60 * 1000) : null
   try {
     await pool.query(
       'INSERT INTO licenses (roblox_id, owner_name, expires_at) VALUES ($1, $2, $3) ON CONFLICT (roblox_id) DO UPDATE SET is_active = true, owner_name = $2, expires_at = $3',
       [String(roblox_id), owner_name, expires_at]
     )
-    // Hapus cache kalau ada
     delete validCache[String(roblox_id)]
     return res.json({ success: true, message: `Lisensi ${roblox_id} ditambahkan!` })
   } catch (err) {
@@ -238,17 +233,11 @@ app.post('/add-license', async (req, res) => {
 // ✅ Cabut Lisensi
 app.post('/revoke', async (req, res) => {
   const { secret, roblox_id } = req.body
-
   if (secret !== process.env.API_SECRET) {
     return res.status(401).json({ success: false, reason: "Unauthorized" })
   }
-
   try {
-    await pool.query(
-      'UPDATE licenses SET is_active = false WHERE roblox_id = $1',
-      [String(roblox_id)]
-    )
-    // Hapus cache
+    await pool.query('UPDATE licenses SET is_active = false WHERE roblox_id = $1', [String(roblox_id)])
     delete validCache[String(roblox_id)]
     return res.json({ success: true, message: `Lisensi ${roblox_id} dicabut!` })
   } catch (err) {
@@ -259,16 +248,11 @@ app.post('/revoke', async (req, res) => {
 // ✅ Aktifkan Lisensi
 app.post('/enable', async (req, res) => {
   const { secret, roblox_id } = req.body
-
   if (secret !== process.env.API_SECRET) {
     return res.status(401).json({ success: false, reason: "Unauthorized" })
   }
-
   try {
-    await pool.query(
-      'UPDATE licenses SET is_active = true WHERE roblox_id = $1',
-      [String(roblox_id)]
-    )
+    await pool.query('UPDATE licenses SET is_active = true WHERE roblox_id = $1', [String(roblox_id)])
     delete validCache[String(roblox_id)]
     return res.json({ success: true, message: `Lisensi ${roblox_id} diaktifkan!` })
   } catch (err) {
@@ -279,14 +263,58 @@ app.post('/enable', async (req, res) => {
 // ✅ List Semua Lisensi
 app.get('/list', async (req, res) => {
   const { secret } = req.query
-
   if (secret !== process.env.API_SECRET) {
     return res.status(401).json({ success: false, reason: "Unauthorized" })
   }
-
   try {
     const result = await pool.query('SELECT * FROM licenses ORDER BY created_at DESC')
     return res.json({ success: true, licenses: result.rows })
+  } catch (err) {
+    return res.status(500).json({ success: false, reason: err.message })
+  }
+})
+
+// ✅ Tambah Blacklist
+app.post('/blacklist', async (req, res) => {
+  const { secret, roblox_id, reason } = req.body
+  if (secret !== process.env.API_SECRET) {
+    return res.status(401).json({ success: false, reason: "Unauthorized" })
+  }
+  try {
+    await pool.query(
+      'INSERT INTO blacklist (roblox_id, reason) VALUES ($1, $2) ON CONFLICT (roblox_id) DO NOTHING',
+      [String(roblox_id), reason || "Diblacklist oleh admin"]
+    )
+    delete validCache[String(roblox_id)]
+    return res.json({ success: true, message: `${roblox_id} diblacklist!` })
+  } catch (err) {
+    return res.status(500).json({ success: false, reason: err.message })
+  }
+})
+
+// ✅ Hapus Blacklist
+app.post('/unblacklist', async (req, res) => {
+  const { secret, roblox_id } = req.body
+  if (secret !== process.env.API_SECRET) {
+    return res.status(401).json({ success: false, reason: "Unauthorized" })
+  }
+  try {
+    await pool.query('DELETE FROM blacklist WHERE roblox_id = $1', [String(roblox_id)])
+    return res.json({ success: true, message: `${roblox_id} dihapus dari blacklist!` })
+  } catch (err) {
+    return res.status(500).json({ success: false, reason: err.message })
+  }
+})
+
+// ✅ List Blacklist
+app.get('/blacklist-list', async (req, res) => {
+  const { secret } = req.query
+  if (secret !== process.env.API_SECRET) {
+    return res.status(401).json({ success: false, reason: "Unauthorized" })
+  }
+  try {
+    const result = await pool.query('SELECT * FROM blacklist ORDER BY created_at DESC')
+    return res.json({ success: true, blacklist: result.rows })
   } catch (err) {
     return res.status(500).json({ success: false, reason: err.message })
   }
